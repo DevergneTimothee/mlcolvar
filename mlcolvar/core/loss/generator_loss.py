@@ -17,7 +17,7 @@ class GeneratorLoss(torch.nn.Module):
     Computes the loss to learn a representation for the generator
     """
 
-    def __init__(self, eta, cell, friction, alpha, n_cvs):
+    def __init__(self, eta, cell, friction, alpha, n_cvs,u_stat=True):
         """
         eta: float
         eta : float
@@ -39,6 +39,7 @@ class GeneratorLoss(torch.nn.Module):
         self.lambdas = torch.nn.Parameter(10 * torch.randn(n_cvs), requires_grad=True)
         self.alpha = alpha
         self.cell = cell
+        self.u_stat=u_stat
 
     def forward(self, data, output, weights, gradient_descriptors=None):
         return generator_loss(
@@ -51,6 +52,7 @@ class GeneratorLoss(torch.nn.Module):
             self.lambdas,
             weights,
             gradient_descriptors,
+            u_stat=self.u_stat,
         )
 
 
@@ -76,6 +78,7 @@ def generator_loss(
     lambdas,
     weights,
     gradient_descriptors=None,
+    u_stat=True
 ):
     """
     Computes the loss to learn the representation
@@ -125,40 +128,63 @@ def generator_loss(
         gradient_positions /= cell
 
     ### In order to have unbiased estimation, we split the dataset in two chunks ###
-    weights_X, weights_Y = weights[:sample_size], weights[sample_size:]
-    gradient_X, gradient_Y = (
-        gradient_positions[:sample_size],
-        gradient_positions[sample_size:],
-    )
-    psi_X, psi_Y = output[:sample_size], output[sample_size:]
+    if u_stat:
+        weights_X, weights_Y = weights[:sample_size], weights[sample_size:]
+        gradient_X, gradient_Y = (
+            gradient_positions[:sample_size],
+            gradient_positions[sample_size:],
+        )
+        psi_X, psi_Y = output[:sample_size], output[sample_size:]
 
-    cov_X = compute_covariance(psi_X, weights_X)
+        cov_X = compute_covariance(psi_X, weights_X)
 
-    cov_Y = compute_covariance(psi_Y, weights_Y)
+        cov_Y = compute_covariance(psi_Y, weights_Y)
 
-    dcov_X = compute_covariance(gradient_X, weights_X)
+        dcov_X = compute_covariance(gradient_X, weights_X)
 
-    dcov_Y = compute_covariance(gradient_Y, weights_Y)
+        dcov_Y = compute_covariance(gradient_Y, weights_Y)
 
-    W1 = (eta * cov_X + dcov_X) @ diag_lamb
-    W2 = (eta * cov_Y + dcov_Y) @ diag_lamb
+        W1 = (eta * cov_X + dcov_X) @ diag_lamb
+        W2 = (eta * cov_Y + dcov_Y) @ diag_lamb
 
     ### Unbiased estimation of the "variational part"
     # It might be worse replacing with einsum if it is faster
-    loss_ef = torch.trace(
-        ((cov_X @ diag_lamb) @ W2 + (cov_Y @ diag_lamb) @ W1) / 2
-        - cov_X @ diag_lamb
-        - cov_Y @ diag_lamb
-    )
+        loss_ef = torch.trace(
+            ((cov_X @ diag_lamb) @ W2 + (cov_Y @ diag_lamb) @ W1) / 2
+            - cov_X @ diag_lamb
+            - cov_Y @ diag_lamb
+        )
 
     # Compute loss_ortho
-    loss_ortho = alpha * (
-        torch.trace(
-            (torch.eye(output.shape[1], device=output.device) - cov_X).T
-            @ (torch.eye(output.shape[1], device=output.device) - cov_Y)
+        loss_ortho = alpha * (
+            torch.trace(
+                (torch.eye(output.shape[1], device=output.device) - cov_X).T
+                @ (torch.eye(output.shape[1], device=output.device) - cov_Y)
+            )
         )
-    )
+    else:
 
+        cov = compute_covariance(output, weights)
+
+        dcov = compute_covariance(gradient_positions, weights)
+
+
+        W = (eta * cov + dcov) @ diag_lamb
+
+    ### Unbiased estimation of the "variational part"
+    # It might be worse replacing with einsum if it is faster
+        loss_ef = torch.trace(
+            (cov @ diag_lamb) @ W
+            - 2*cov @ diag_lamb
+        )
+
+    # Compute loss_ortho
+        loss_ortho = alpha * (
+            torch.trace(
+                (torch.eye(output.shape[1], device=output.device) - cov).T
+                @ (torch.eye(output.shape[1], device=output.device) - cov)
+            )
+        )
     loss = loss_ef + loss_ortho  # loss_ortho
     return loss, loss_ef, loss_ortho
 

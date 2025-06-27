@@ -27,7 +27,9 @@ class Generator(BaseCV, lightning.LightningModule):
         alpha: float,
         friction=None,
         cell: float = None,
+        u_stat=True,
         options: dict = None,
+
         **kwargs,
     ):
         """Define a NN-based generator model
@@ -55,7 +57,7 @@ class Generator(BaseCV, lightning.LightningModule):
 
         # =======  LOSS  =======
         self.loss_fn = GeneratorLoss(
-            eta=eta, alpha=alpha, cell=cell, friction=friction, n_cvs=r
+            eta=eta, alpha=alpha, cell=cell, friction=friction, n_cvs=r,u_stat=u_stat
         )
         self.r = r
         self.eta = eta
