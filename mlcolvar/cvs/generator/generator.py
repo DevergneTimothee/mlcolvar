@@ -10,6 +10,16 @@ from mlcolvar.data import DictDataset
 
 __all__ = ["Generator"]
 
+class Softmax_PostProc(torch.nn.Module):
+    def __init__(self, r=4):
+        super(Softmax_PostProc, self).__init__()
+        self.p = r
+        self.final_linear = torch.nn.Linear(r, r)
+
+    def forward(self, input):
+        input=torch.nn.functional.softmax(input)
+        input=self.final_linear(input)
+        return input
 
 class Generator(BaseCV, lightning.LightningModule):
     """
@@ -47,6 +57,7 @@ class Generator(BaseCV, lightning.LightningModule):
                  descriptors_derivatives: Union[SmartDerivatives, torch.Tensor] = None,
                  n_dim: int = 3,
                  u_stat:bool = True,
+                 softmax_postproc=True,
                  options: dict = None,
                  **kwargs
                  ):
@@ -89,16 +100,17 @@ class Generator(BaseCV, lightning.LightningModule):
                                      cell=cell,
                                      descriptors_derivatives=descriptors_derivatives,
                                      n_dim=n_dim,
-                                     u_stat=u_stat
+                                     u_stat=u_stat,
+                                     softmax_postproc=softmax_postproc
                                      )
         self.r = r
         self.eta = eta
         self.friction = friction
         self.cell = cell
         self.n_dim=n_dim
-
+        self.softmax_postproc=softmax_postproc
         # check layers
-        if layers[-1] != 1:
+        if layers[-1] != r:
             raise ValueError ( 
                 f"The last layer of the neural network should have dimension 1! Found {layers[-1]}"
                 )
@@ -117,9 +129,10 @@ class Generator(BaseCV, lightning.LightningModule):
         # set default activation to tanh
         if "activation" not in options[o]:
             options[o]["activation"] = "tanh"
-        self.nn = torch.nn.ModuleList(
-            [FeedForward(layers, **options[o]) for idx in range(r)]
-        )
+        self.nn = FeedForward(layers, **options[o]) 
+        if self.softmax_postproc:
+            self.postprocessing=Softmax_PostProc(r)
+        #self.final_linear = torch.nn.Linear(r, r)
 
     def compute_eigenfunctions(self,
                                dataset : DictDataset,        
@@ -172,11 +185,14 @@ class Generator(BaseCV, lightning.LightningModule):
         input.requires_grad = True
         
         # get output
-        output = self.forward(input)
+        output = self.forward_cv(input)
 
         # If the calculation has not been done previously, or we want to compute again the eigenpairs due to a change of parameters
         if (recompute or self.evecs is None): 
             # get eigenfunctions
+            if self.softmax_postproc:
+                output=torch.nn.functional.softmax(output) 
+                self.r+=1  
             eigenfunctions, evals, evecs = compute_eigenfunctions(
                 input=input,
                 output=output,
@@ -187,7 +203,8 @@ class Generator(BaseCV, lightning.LightningModule):
                 cell=cell,
                 tikhonov_reg=tikhonov_reg,
                 descriptors_derivatives=descriptors_derivatives,
-                n_dim=self.n_dim
+                n_dim=self.n_dim,
+                softmax_postproc=self.softmax_postproc
             )
             self.evals = evals
             self.evecs = evecs
@@ -201,7 +218,13 @@ class Generator(BaseCV, lightning.LightningModule):
     def forward_cv(self, 
                    x: torch.Tensor
                    ) -> torch.Tensor:
-        return torch.cat([nn(x) for nn in self.nn], dim=1)
+        #x = self.nn(x)
+        #x = torch.nn.functional.softmax(x, dim=-1)                # Softmax
+        #x = self.final_linear(x)
+        #x = torch.cat((x,one_column),dim=1)
+        return self.nn(x)
+
+
 
     def training_step(self, 
                       train_batch, 

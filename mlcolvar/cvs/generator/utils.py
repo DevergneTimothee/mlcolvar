@@ -15,6 +15,7 @@ def compute_eigenfunctions(input : torch.Tensor,
                            tikhonov_reg : float = 1e-4,
                            descriptors_derivatives : Union[SmartDerivatives, torch.Tensor] = None,
                            n_dim : int = 3,
+                           softmax_postproc=True,
                            ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes eigenfunctions and eigenvalues from a learned representation.
 
@@ -69,12 +70,14 @@ def compute_eigenfunctions(input : torch.Tensor,
     device = input.device
 
     # check output and r
+    
+    if softmax_postproc:
+        one_column = torch.ones((output.shape[0],1),device=device)
+        output = torch.cat((output,one_column),dim=1)
     if output.shape[-1] != r:
         raise ValueError ( 
             f"The number of eigenfunctions to compute (r) must match the number of outputs from the model! Found r:{r} and output.shape:{output.shape}"
             )
-        
-
     # expand friction tensor
     friction = friction.unsqueeze(-1).repeat((1, n_dim)).ravel()
 
@@ -108,8 +111,8 @@ def compute_eigenfunctions(input : torch.Tensor,
 
     
 
-    if r==1:
-        gradient_positions = gradient_positions.unsqueeze(-1)
+    #if r==1:
+    #    gradient_positions = gradient_positions.unsqueeze(-1)
 
     # this is to make the following computation easier to write
     gradient_positions = gradient_positions.swapaxes(2,1)
@@ -143,7 +146,7 @@ def compute_eigenfunctions(input : torch.Tensor,
     # ------------------------ EIGENFUNCTIONS ------------------------
 
     # get eigenvalues and eigenvectors of resolvent
-    evals, evecs = torch.linalg.eigh(operator)
+    evals, evecs = torch.linalg.eig(operator)
 
     # eigenfunctions and eigenvalues of generator
     lambdas = eta - 1 / evals.real
@@ -158,7 +161,6 @@ def compute_eigenfunctions(input : torch.Tensor,
     eigenfunctions /= torch.sqrt( torch.mean( weights.unsqueeze(1) * eigenfunctions**2, axis=0 ) )
 
     return eigenfunctions[:, sorting], lambdas.detach()[sorting], detached_evecs.detach()[:, sorting]
-
 
 # For the future, it might be worth having a more general function
 def forecast_state_occupation(eigenfunctions: torch.Tensor,

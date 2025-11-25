@@ -21,6 +21,7 @@ class GeneratorLoss(torch.nn.Module):
                  descriptors_derivatives: Union[SmartDerivatives, torch.Tensor] = None,
                  n_dim: int = 3,
                  u_stat: bool = True,
+                 softmax_postproc=True,
                  ):
         """Computes the loss to learn a representation on which the resolvent of the infinitesimal generator can be learned
 
@@ -61,6 +62,7 @@ class GeneratorLoss(torch.nn.Module):
         self.descriptors_derivatives = descriptors_derivatives
         self.n_dim = n_dim
         self.u_stat=u_stat
+        self.softmax_postproc=softmax_postproc
 
     def forward(self,
                 input : torch.Tensor,
@@ -85,7 +87,8 @@ class GeneratorLoss(torch.nn.Module):
                               descriptors_derivatives=self.descriptors_derivatives,
                               ref_idx=ref_idx,
                               n_dim=self.n_dim,
-                              u_stat=self.u_stat
+                              u_stat=self.u_stat,
+                              softmax_postproc=self.softmax_postproc
                               )
 
 
@@ -113,6 +116,7 @@ def generator_loss(input : torch.Tensor,
                    ref_idx : torch.Tensor = None,
                    n_dim : int = 3,
                    u_stat : bool = True,
+                   softmax_postproc=True,
                    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Optimizes r functions to be the representation on which the resolvent of the infinitesimal generator can be learned
 
@@ -163,12 +167,17 @@ def generator_loss(input : torch.Tensor,
 
     # move and process lambdas to device
     lambdas = lambdas.to(device)
-    diag_lamb = torch.diag(lambdas**2)
     
+    diag_lamb = torch.diag(lambdas**2)
+    if softmax_postproc:
+        diag_lamb = torch.block_diag(diag_lamb, torch.tensor(1/eta+1e-6,device=device).unsqueeze(0))
     # get number of outputs and sample sizes
     r = output.shape[1]
     sample_size = output.shape[0] // 2
 
+    if softmax_postproc:
+        one_column = torch.ones((output.shape[0],1),device=device)
+        output = torch.cat((output,one_column),dim=1)
     # expand friction tensor
     friction = friction.repeat_interleave(n_dim) 
 
@@ -179,14 +188,14 @@ def generator_loss(input : torch.Tensor,
                                                 inputs=input,
                                                 grad_outputs=grad_outputs, 
                                                 retain_graph=True, 
-                                                create_graph=True)[0] for idx in range(r)
+                                                create_graph=True)[0] for idx in range(r+1)
                             ], dim=2)
     
     
     # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
     # --> If we pass a SmartDerivative object that takes the nonzero elements of the matrix d_desc/d_pos
     if isinstance(descriptors_derivatives, SmartDerivatives):
-        gradient_positions = descriptors_derivatives(gradient, ref_idx).view(input.shape[0], -1, r)
+        gradient_positions = descriptors_derivatives(gradient, ref_idx).view(input.shape[0], -1, r+1)
     
     # --> If we directly pass the matrix d_desc/d_pos
     elif isinstance(descriptors_derivatives, torch.Tensor): 
@@ -202,8 +211,8 @@ def generator_loss(input : torch.Tensor,
         gradient_positions = gradient 
 
 
-    if r==1:
-        gradient_positions = gradient_positions.unsqueeze(-1)
+    #if r==1:
+    #    gradient_positions = gradient_positions.unsqueeze(-1)
 
     # this is to make the following computation easier to write
     gradient_positions = gradient_positions.transpose(2,1).contiguous()
@@ -215,7 +224,6 @@ def generator_loss(input : torch.Tensor,
         gradient_positions = gradient_positions * torch.sqrt(friction)
     except RuntimeError as e:
         raise RuntimeError(e, """[HINT]: Is you system in 3 dimension? By default the code assumes so, if it's not the case change the n_dim key to the right dimensionality.""")
-
 
     # ------------------------ COVARIANCES ------------------------
     if u_stat:
