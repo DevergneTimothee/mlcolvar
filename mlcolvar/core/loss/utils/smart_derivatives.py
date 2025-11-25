@@ -562,6 +562,10 @@ def test_smart_derivatives():
     from mlcolvar.core.nn import FeedForward
     from mlcolvar.data import DictDataset
     
+    default_dtype = torch.get_default_dtype()
+    # this way tests are less prone to fail on different OS
+    torch.set_default_dtype(torch.float64)
+
     # full atoms with all distances
     n_atoms_1 = 10
     pos_1 = torch.Tensor([[ 1.4970,  1.3861, -0.0273, -1.4933,  1.5070, -0.1133, -1.4473, -1.4193,
@@ -756,6 +760,10 @@ def test_smart_derivatives():
         assert(torch.allclose(smart_out, ref, atol=1e-3))
         assert(torch.allclose(smart_out, Ref, atol=1e-3))
         smart_out.sum().backward()
+    
+    # reset orginal default dtype
+    torch.set_default_dtype(default_dtype)
+
 
             
 def test_batched_smart_derivatives():
@@ -925,6 +933,8 @@ def test_train_with_smart_derivatives():
     from mlcolvar.cvs import Committor, Generator
     from mlcolvar.cvs.committor.utils import initialize_committor_masses
     from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
+    from mlcolvar.explain.sensitivity import sensitivity_analysis
+
     import lightning
 
     # committor
@@ -936,11 +946,10 @@ def test_train_with_smart_derivatives():
                         1.2970, -1.3233, -0.4643,  1.1670, -1.3253, -0.5354]])
     
     pos = pos.repeat(200, 1)
-    labels = torch.arange(0, 5).unsqueeze(-1).repeat(40,1).sort()[0]
+    labels = torch.arange(0, 5, dtype=torch.float32).unsqueeze(-1).repeat(40,1).sort()[0]
     weights = torch.ones_like(labels)
     atomic_masses = initialize_committor_masses(atom_types=[0, 0, 1, 2, 0, 0, 0, 1, 2, 0], 
-                                            masses=[12.011, 15.999, 14.007], 
-                                            n_dims=3)
+                                            masses=[12.011, 15.999, 14.007])
 
     dataset = DictDataset({'data' : pos, 'labels' : labels, 'weights': weights})
 
@@ -962,7 +971,7 @@ def test_train_with_smart_derivatives():
     datamodule = DictModule(dataset=smart_dataset, lengths=[0.8, 0.2], batch_size=80)
     
     model = Committor(layers=[45, 10, 1],
-                      mass=atomic_masses,
+                      atomic_masses=atomic_masses,
                       alpha=1,
                       separate_boundary_dataset=True,
                       descriptors_derivatives=smart_derivatives 
@@ -972,6 +981,8 @@ def test_train_with_smart_derivatives():
     
     trainer.fit(model, datamodule)
 
+    # check that sensitivity works
+    sensitivity_analysis(model=model, dataset=smart_dataset)
 
     # Generator
     kT = 2.49432
@@ -1040,6 +1051,9 @@ def test_train_with_smart_derivatives():
     print(eigfuncs.shape)
     print(eigvals.shape)
     print(eigvecs.shape)
+
+    # check that sensitivity works
+    sensitivity_analysis(model=model, dataset=smart_dataset)
 
     
 if __name__ == "__main__":
