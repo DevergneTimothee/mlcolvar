@@ -223,12 +223,7 @@ class Generator(BaseCV, lightning.LightningModule):
                    x: torch.Tensor
                    ) -> torch.Tensor:
         return self.nn(x)
-    def forward(
-        self,
-        data: Dict[str, torch.Tensor],
-        token: bool = False
-    ) -> torch.Tensor:
-        return self.nn(data)
+
 
     def training_step(self, 
                       train_batch, 
@@ -244,10 +239,16 @@ class Generator(BaseCV, lightning.LightningModule):
             x.requires_grad = True
 
             weights = train_batch["weights"]
+            if "derivatives" in train_batch.keys():
+                derivatives = train_batch["derivatives"]
+            else:
+                derivatives=None
         elif isinstance(self.nn, BaseGNN):
             x = self._setup_graph_data(train_batch)
             labels = x['graph_labels']
             weights = x['weight'].clone()
+            derivatives=None
+
         try:
             ref_idx = train_batch["ref_idx"]
         except KeyError:
@@ -255,12 +256,16 @@ class Generator(BaseCV, lightning.LightningModule):
 
         # =================forward====================
         # we use forward and not forward_cv to also apply the preprocessing (if present)
-        q = self.forward_nn(x)
+        z = self.forward_nn(x)
+        if self.postprocessing is not None:
+            q=self.postprocessing(z)
+        else:
+            q=z
         # ===================loss=====================
         if self.training:
-            loss, loss_ef, loss_ortho = self.loss_fn(x, q, weights, ref_idx)
+            loss, loss_ef, loss_ortho = self.loss_fn(x, q, weights, ref_idx, derivatives=derivatives)
         else:
-            loss, loss_ef, loss_ortho = self.loss_fn(x, q, weights, ref_idx)
+            loss, loss_ef, loss_ortho = self.loss_fn(x, q, weights, ref_idx, derivatives=derivatives)
         # ====================log=====================+
         name = "train" if self.training else "valid"
         self.log(f"{name}_loss", loss, on_epoch=True)
