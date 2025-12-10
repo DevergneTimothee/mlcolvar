@@ -1,13 +1,97 @@
 import torch
+import torch_geometric
+import gc
+from mlcolvar.utils._code import scatter_sum
 from typing import Union, Tuple
 from mlcolvar.core.loss.generator_loss import compute_covariance
 from mlcolvar.core.loss.utils.smart_derivatives import SmartDerivatives
+from mlcolvar.data import DictDataset
 
 __all__ = ["compute_eigenfunctions", "forecast_state_occupation"]
 
-def compute_eigenfunctions(input : torch.Tensor,
-                           output : torch.Tensor,
-                           weights : torch.Tensor,
+def compute_covariances(input,output,weights,r,friction,n_dim=3,descriptors_derivatives : Union[SmartDerivatives, torch.Tensor] = None, ref_idx=None):
+    if isinstance(input, torch_geometric.data.batch.Batch):
+        _is_graph_data = True
+        batch = torch.clone(input['batch'])
+        node_types = torch.where(input['node_attrs'])[1]
+        input = input['positions']
+        device = input.device
+    else:
+        _is_graph_data=False
+    device = input.device
+
+    # check output and r
+    if output.shape[-1] != r:
+        raise ValueError ( 
+            f"The number of eigenfunctions to compute (r) must match the number of outputs from the model! Found r:{r} and output.shape:{output.shape}"
+            )
+        
+    one_column = torch.ones((output.shape[0],1),device=device)
+    output = torch.cat((output,one_column),dim=1)
+    # expand friction tensor
+    if _is_graph_data:
+        friction = friction[node_types].unsqueeze(1).unsqueeze(2)
+    else:
+        friction = friction.repeat_interleave(n_dim) 
+    # ------------------------ GRADIENTS ------------------------    
+    # compute gradients of output wrt to the input iterating on the outputs
+    grad_outputs = torch.ones(len(output), device=device)
+    gradient = torch.stack([torch.autograd.grad(outputs=output[:, idx],
+                                                inputs=input,
+                                                grad_outputs=grad_outputs, 
+                                                retain_graph=True, 
+                                                create_graph=True)[0] for idx in range(r+1)
+                            ], dim=2)
+    
+    # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
+    # --> If we pass a SmartDerivative object that takes the nonzero elements of the matrix d_desc/d_pos
+    if isinstance(descriptors_derivatives, SmartDerivatives):
+        gradient_positions = descriptors_derivatives(gradient, ref_idx).reshape(input.shape[0], -1, r)
+    
+    # --> If we directly pass the matrix d_desc/d_pos
+    elif isinstance(descriptors_derivatives, torch.Tensor): 
+        descriptors_derivatives = descriptors_derivatives.to(device)
+        gradient_positions = torch.einsum("bdo,badx->baxo", gradient, descriptors_derivatives)
+        gradient_positions = gradient_positions.reshape(input.shape[0],  # number of entries
+                                                        descriptors_derivatives.shape[1] * 3, # number of atoms * 3 
+                                                        output.shape[-1] # number of outputs
+                                                        )
+        
+    # If the input was already positions
+    else:
+        gradient_positions = gradient
+
+    
+
+    if r==1:
+        gradient_positions = gradient_positions.unsqueeze(-1)
+
+    # this is to make the following computation easier to write
+    gradient_positions = gradient_positions.swapaxes(2,1)
+    #if cell is not None:
+    #    gradient_positions /= cell.repeat_interleave(gradient_positions.shape[-1]//n_dim)
+    # multiply by friction
+    try:
+        gradient_positions = gradient_positions * torch.sqrt(friction)
+    except RuntimeError as e:
+        raise RuntimeError(e, """[HINT]: Is you system in 3 dimension? By default the code assumes so, if it's not the case change the n_dim key to the right dimensionality.""")
+
+    if _is_graph_data:
+        gradient_positions = torch.einsum("ikd,ild->ikl",gradient_positions, gradient_positions)
+        gradient_positions = scatter_sum(gradient_positions, batch,dim=0)
+        dcov_X = torch.einsum("ikl,i->kl",gradient_positions,weights)
+    else:
+        dcov_X = compute_covariance(gradient_positions, weights)
+    # ------------------------ COVARIANCES ------------------------
+    # Compute covariances
+    cov_X = torch.einsum("ik,il,i->kl",output,output,weights)
+    del gradient_positions
+    del gradient
+    return cov_X.detach(), dcov_X.detach() 
+
+
+def compute_eigenfunctions(dataset : DictDataset,
+                           forward_call,
                            r : int,
                            eta : float,
                            friction : torch.Tensor,
@@ -15,6 +99,8 @@ def compute_eigenfunctions(input : torch.Tensor,
                            tikhonov_reg : float = 1e-4,
                            descriptors_derivatives : Union[SmartDerivatives, torch.Tensor] = None,
                            n_dim : int = 3,
+                           batch_size=None,
+                           is_graph=False,
                            ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Computes eigenfunctions and eigenvalues from a learned representation.
 
@@ -66,77 +152,78 @@ def compute_eigenfunctions(input : torch.Tensor,
 
     # ------------------------ SETUP ------------------------
     # get device
-    device = input.device
-
-    # check output and r
-    if output.shape[-1] != r:
-        raise ValueError ( 
-            f"The number of eigenfunctions to compute (r) must match the number of outputs from the model! Found r:{r} and output.shape:{output.shape}"
-            )
-        
-
-    # expand friction tensor
-    friction = friction.unsqueeze(-1).repeat((1, n_dim)).ravel()
-
-    # ------------------------ GRADIENTS ------------------------    
-    # compute gradients of output wrt to the input iterating on the outputs
-    grad_outputs = torch.ones(len(output), device=device)
-    gradient = torch.stack([torch.autograd.grad(outputs=output[:, idx],
-                                                inputs=input,
-                                                grad_outputs=grad_outputs, 
-                                                retain_graph=True, 
-                                                create_graph=True)[0] for idx in range(r)
-                            ], dim=2)
     
-    # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
-    # --> If we pass a SmartDerivative object that takes the nonzero elements of the matrix d_desc/d_pos
-    if isinstance(descriptors_derivatives, SmartDerivatives):
-        gradient_positions = descriptors_derivatives(gradient).reshape(input.shape[0], -1, r)
-    
-    # --> If we directly pass the matrix d_desc/d_pos
-    elif isinstance(descriptors_derivatives, torch.Tensor): 
-        descriptors_derivatives = descriptors_derivatives.to(device)
-        gradient_positions = torch.einsum("bdo,badx->baxo", gradient, descriptors_derivatives)
-        gradient_positions = gradient_positions.reshape(input.shape[0],  # number of entries
-                                                        descriptors_derivatives.shape[1] * 3, # number of atoms * 3 
-                                                        output.shape[-1] # number of outputs
-                                                        )
-        
-    # If the input was already positions
+
+    if batch_size==None:
+        batch_size = input.shape[0]
+    if is_graph:
+        loader = torch_geometric.loader.DataLoader(dataset, 
+                                                   batch_size=batch_size, 
+                                                   shuffle=False )
+        input = dataset.get_graph_inputs()
+        weights = input['weight']
     else:
-        gradient_positions = gradient
-
+        loader = torch.utils.data.DataLoader(dataset, 
+                                                   batch_size=batch_size, 
+                                                   shuffle=False )
+        weights = dataset["weights"]
     
+    covariance = torch.zeros((r+1,r+1))
+    dcov = torch.zeros((r+1,r+1))
+    output = torch.zeros((len(weights),r+1))
+    for i,batch in enumerate(loader):
+        print(f"Processing batch {i}/{len(loader)}", end='\r')
+        batch_start, batch_stop = i*batch_size, (i+1) * batch_size
+        if is_graph:
+            batch_input = batch["data_list"]
+            batch_input["positions"].requires_grad=True
+            batch_input['node_attrs'].requires_grad=True
+            batch_weights = batch_input["weight"]
+            ref_idx = None
+        else:
+            batch_input = batch["data"]
+            batch_weights = batch["weights"]
+            batch_input.requires_grad = True
+            if isinstance(descriptors_derivatives, SmartDerivatives):
+                ref_idx = batch_input["ref_idx"]
+            else:
+                ref_idx = None
+                descriptors_derivatives=batch["derivatives"]
 
-    if r==1:
-        gradient_positions = gradient_positions.unsqueeze(-1)
+        batch_output = forward_call(batch_input)
+        batch_output = torch.nn.functional.softmax(batch_output,dim=-1)
 
-    # this is to make the following computation easier to write
-    gradient_positions = gradient_positions.swapaxes(2,1)
-    if cell is not None:
-        gradient_positions /= cell.repeat_interleave(gradient_positions.shape[-1]//n_dim)
-    # multiply by friction
-    try:
-        gradient_positions = gradient_positions * torch.sqrt(friction)
-    except RuntimeError as e:
-        raise RuntimeError(e, """[HINT]: Is you system in 3 dimension? By default the code assumes so, if it's not the case change the n_dim key to the right dimensionality.""")
+        cov_batch, dcov_batch = compute_covariances(input=batch_input,
+                                                    output=batch_output,
+                                                    weights=batch_weights,
+                                                    r=batch_output.shape[1],
+                                                    friction=friction,
+                                                    descriptors_derivatives=descriptors_derivatives,
+                                                    ref_idx=ref_idx,
+                                                    n_dim=n_dim
 
+        )
+        one_column = torch.ones((batch_output.shape[0],1),device=batch_output.device)
+        batch_output = torch.cat((batch_output,one_column),dim=1)
+        output[batch_start:batch_stop] = batch_output
+        covariance += cov_batch.detach()
+        dcov += dcov_batch.detach()
+        del batch_input
+        del cov_batch
+        del dcov_batch
+        del batch_output
+        gc.collect()
 
-
-    # ------------------------ COVARIANCES ------------------------
-    # Compute covariances
-    cov_X = compute_covariance(output, weights)
-    dcov_X = compute_covariance(gradient_positions, weights)
 
     # compute action of shifted generator
-    W = eta * cov_X + dcov_X
+    W = eta * covariance + dcov
 
     # The resolvent projected on the learned space
     operator = (
         torch.linalg.inv(
             W + tikhonov_reg * torch.eye(output.size(1), device=output.device)
         )
-        @ cov_X
+        @ covariance
     )
 
 
@@ -158,6 +245,20 @@ def compute_eigenfunctions(input : torch.Tensor,
     eigenfunctions /= torch.sqrt( torch.mean( weights.unsqueeze(1) * eigenfunctions**2, axis=0 ) )
 
     return eigenfunctions[:, sorting], lambdas.detach()[sorting], detached_evecs.detach()[:, sorting]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # For the future, it might be worth having a more general function
