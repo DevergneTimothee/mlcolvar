@@ -32,7 +32,7 @@ def compute_covariances(input,output,weights,r,friction,n_dim=3,descriptors_deri
     if _is_graph_data:
         friction = friction[node_types].unsqueeze(1).unsqueeze(2)
     else:
-        friction = friction.repeat_interleave(n_dim) 
+        friction = friction = friction.unsqueeze(-1).repeat((1, n_dim)).ravel()
     # ------------------------ GRADIENTS ------------------------    
     # compute gradients of output wrt to the input iterating on the outputs
     grad_outputs = torch.ones(len(output), device=device)
@@ -46,7 +46,7 @@ def compute_covariances(input,output,weights,r,friction,n_dim=3,descriptors_deri
     # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
     # --> If we pass a SmartDerivative object that takes the nonzero elements of the matrix d_desc/d_pos
     if isinstance(descriptors_derivatives, SmartDerivatives):
-        gradient_positions = descriptors_derivatives(gradient, ref_idx).reshape(input.shape[0], -1, r)
+        gradient_positions = descriptors_derivatives(gradient, ref_idx).reshape(input.shape[0], -1, r+1)
     
     # --> If we directly pass the matrix d_desc/d_pos
     elif isinstance(descriptors_derivatives, torch.Tensor): 
@@ -81,7 +81,7 @@ def compute_covariances(input,output,weights,r,friction,n_dim=3,descriptors_deri
         gradient_positions = scatter_sum(gradient_positions, batch,dim=0)
         dcov_X = torch.einsum("ikl,i->kl",gradient_positions,weights)
     else:
-        dcov_X = compute_covariance(gradient_positions, weights)
+        dcov_X = torch.einsum("ijk,ilk,i->jl", gradient_positions, gradient_positions, weights) 
     # ------------------------ COVARIANCES ------------------------
     # Compute covariances
     cov_X = torch.einsum("ik,il,i->kl",output,output,weights)
@@ -155,7 +155,7 @@ def compute_eigenfunctions(dataset : DictDataset,
     
 
     if batch_size==None:
-        batch_size = input.shape[0]
+        batch_size = dataset["weights"].shape[0]
     if is_graph:
         loader = torch_geometric.loader.DataLoader(dataset, 
                                                    batch_size=batch_size, 
@@ -168,9 +168,9 @@ def compute_eigenfunctions(dataset : DictDataset,
                                                    shuffle=False )
         weights = dataset["weights"]
     
-    covariance = torch.zeros((r+1,r+1))
-    dcov = torch.zeros((r+1,r+1))
-    output = torch.zeros((len(weights),r+1))
+    covariance = torch.zeros((r+1,r+1),device=weights.device)
+    dcov = torch.zeros((r+1,r+1),device=weights.device)
+    output = torch.zeros((len(weights),r+1),device=weights.device)
     for i,batch in enumerate(loader):
         print(f"Processing batch {i}/{len(loader)}", end='\r')
         batch_start, batch_stop = i*batch_size, (i+1) * batch_size
@@ -185,10 +185,12 @@ def compute_eigenfunctions(dataset : DictDataset,
             batch_weights = batch["weights"]
             batch_input.requires_grad = True
             if isinstance(descriptors_derivatives, SmartDerivatives):
-                ref_idx = batch_input["ref_idx"]
-            else:
+                ref_idx = batch["ref_idx"]
+            elif "derivatives" in batch.keys():
                 ref_idx = None
                 descriptors_derivatives=batch["derivatives"]
+            else:
+                ref_idx=None
 
         batch_output = forward_call(batch_input)
         batch_output = torch.nn.functional.softmax(batch_output,dim=-1)
@@ -214,7 +216,8 @@ def compute_eigenfunctions(dataset : DictDataset,
         del batch_output
         gc.collect()
 
-
+    covariance /= weights.shape[0]
+    dcov /= weights.shape[0]
     # compute action of shifted generator
     W = eta * covariance + dcov
 
@@ -230,7 +233,7 @@ def compute_eigenfunctions(dataset : DictDataset,
     # ------------------------ EIGENFUNCTIONS ------------------------
 
     # get eigenvalues and eigenvectors of resolvent
-    evals, evecs = torch.linalg.eigh(operator)
+    evals, evecs = torch.linalg.eig(operator)
 
     # eigenfunctions and eigenvalues of generator
     lambdas = eta - 1 / evals.real

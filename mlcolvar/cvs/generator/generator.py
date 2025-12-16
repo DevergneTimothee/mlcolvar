@@ -200,7 +200,7 @@ class Generator(BaseCV, lightning.LightningModule):
                 tikhonov_reg=tikhonov_reg,
                 descriptors_derivatives=descriptors_derivatives,
                 n_dim=self.n_dim,
-                batch_size=1000,
+                batch_size=batch_size,
                 is_graph=is_graph
                 )
                 self.evals = evals
