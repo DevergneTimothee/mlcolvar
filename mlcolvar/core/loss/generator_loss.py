@@ -172,13 +172,14 @@ def generator_loss(input : torch.Tensor,
     if softmax_postproc:
         diag_lamb = torch.block_diag(diag_lamb, torch.tensor(1/eta+1e-6,device=device).unsqueeze(0))
     # get number of outputs and sample sizes
-    r = output.shape[1]
+    
     sample_size = output.shape[0] // 2
 
     if softmax_postproc:
         one_column = torch.ones((output.shape[0],1),device=device)
         output = torch.cat((output,one_column),dim=1)
     # expand friction tensor
+    r = output.shape[1]
     friction = friction.repeat_interleave(n_dim) 
 
     # ------------------------ GRADIENTS ------------------------    
@@ -188,14 +189,14 @@ def generator_loss(input : torch.Tensor,
                                                 inputs=input,
                                                 grad_outputs=grad_outputs, 
                                                 retain_graph=True, 
-                                                create_graph=True)[0] for idx in range(r+1)
+                                                create_graph=True)[0] for idx in range(r)
                             ], dim=2)
     
     
     # in case the input is not positions but descriptors, we need to correct the gradients up to the positions
     # --> If we pass a SmartDerivative object that takes the nonzero elements of the matrix d_desc/d_pos
     if isinstance(descriptors_derivatives, SmartDerivatives):
-        gradient_positions = descriptors_derivatives(gradient, ref_idx).view(input.shape[0], -1, r+1)
+        gradient_positions = descriptors_derivatives(gradient, ref_idx).view(input.shape[0], -1, r)
     
     # --> If we directly pass the matrix d_desc/d_pos
     elif isinstance(descriptors_derivatives, torch.Tensor): 
