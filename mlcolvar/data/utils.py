@@ -29,7 +29,7 @@ def load_dataset(file_name: str) -> DictDataset:
     file_name: str
         Name of the file to load the dataset from
     """
-    dataset = torch.load(file_name)
+    dataset = torch.load(file_name, weights_only=False)
 
     assert isinstance(dataset, DictDataset)
 
@@ -53,7 +53,10 @@ def save_dataset_configurations_as_extyz(dataset: DictDataset, file_name: str) -
         )
     
     # initialize the atomic number object
-    z_table = AtomicNumberTable.from_zs(dataset.metadata["z_table"])
+    atomic_numbers = dataset.metadata.get("atomic_numbers", None)
+    if atomic_numbers is None:
+        raise KeyError("Dataset metadata missing 'atomic_numbers'.")
+    z_table = AtomicNumberTable.from_zs(atomic_numbers)
 
     # create file
     fp = open(file_name, 'w')
@@ -147,5 +150,3 @@ def test_save_dataset():
         
 if __name__ == "__main__":
     test_save_dataset()
-
-

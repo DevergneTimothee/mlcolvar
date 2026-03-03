@@ -169,7 +169,7 @@ def plot_isolines_2D(
                         function.training = train_mode
                 if component is not None:
                     s = s[component]
-                z[i, j] = s
+                z[i, j] = np.squeeze(s)
     # else apply function directly to grid points
     else:
         z = function(xv, yv)
@@ -365,7 +365,15 @@ def pbar(
     file : TextIO
         The output file.
     """
-    if (use_unicode):
+    if use_unicode:
+        encoding = getattr(file, "encoding", None)
+        if encoding:
+            try:
+                ("█━").encode(encoding)
+            except Exception:
+                use_unicode = False
+
+    if use_unicode:
         c_1 = ''
         c_2 = '█'
         c_3 = '━'
